@@ -1,0 +1,131 @@
+#!/bin/bash
+
+# Confirm Function
+confirm () {
+    # call with a prompt string or use a default
+    read -r -p "${1:-Are you sure? [y/N]} " response
+    case $response in
+        [yY][eE][sS]|[yY])
+            true
+            ;;
+        *)
+            false
+            ;;
+    esac
+}
+
+# Update and Upgrade The System
+echo "Update Package List"
+confirm "Would you really update package list ? [y/N]" && apt-get update
+confirm "Would you really upgrade all the package in the system ? [y/N]" && apt-get -y upgrade
+
+if confirm "Would you Install LDAP Client Authentication ? [y/N]"
+then
+  # Install LDAP Client Authentication
+  apt-get install -y ldap-auth-client nscd
+  auth-client-config -t nss -p lac_ldap
+
+  # Configure LDAP.conf
+  rm /etc/ldap/ldap.conf
+  echo "
+  #
+  # LDAP Defaults
+  #
+
+  # See ldap.conf(5) for details
+  # This file should be world readable but not world writable.
+
+  BASE    dc=<domain>,dc=<extension>>
+  URI     ldap://<ldapserverurl>
+
+  #SIZELIMIT      12
+  #TIMELIMIT      15
+  #DEREF          never
+
+  # TLS certificates (needed for GnuTLS)
+  # TLS_CACERT      /opt/ca.pem
+
+  TIMEOUT 10
+  NSS_BASE_PASSWD ou=<Users>,dc=<domain>,dc=<extension>
+  OPENSSH_LDAP_LOGLEVEL   debug
+  OPENSSH_LDAP_LOGFILE    /var/log/openssh_ldap.log
+  " > /etc/ldap/ldap.conf
+
+  # echo "<yourCA>" > /opt/ca.pem
+fi
+
+if confirm "Would you Configure PAM ? [y/N]"
+then
+  # Configure PAM
+  # Make HomeDir Add
+  if [ -e /usr/share/pam-configs/my_mkhomedir ]
+  then
+    rm /usr/share/pam-configs/my_mkhomedir
+  fi
+
+  echo "
+  Name: activate mkhomedir
+  Default: yes
+  Priority: 900
+  Session-Type: Additional
+  Session:
+          required                        pam_mkhomedir.so umask=0022 skel=/etc/skel" > /usr/share/pam-configs/my_mkhomedir
+
+  # Check /etc/security/group.conf
+  if grep -q "*;*;*;Al0000-2400;cdrom dip plugdev lpadmin sambashare" /etc/security/group.conf
+  then
+    echo "Security Already Set"
+  else
+    echo "*;*;*;Al0000-2400;cdrom dip plugdev lpadmin sambashare" >> /etc/security/group.conf
+  fi
+
+  # Activate Security Group
+  if [ -e /usr/share/pam-configs/my_group ]
+  then
+    rm /usr/share/pam-configs/my_group
+  fi
+
+  echo "
+  Name: activate /etc/security/group.conf
+  Default: yes
+  Priority: 900
+  Auth-Type: Primary
+  Auth:
+          required                        pam_group.so use_first_pass" > /usr/share/pam-configs/my_group
+
+  # Update PAM
+  pam-auth-update
+  /etc/init.d/nscd restart
+fi
+
+# SSH Key Support
+
+if confirm "Configure Client for SSH Public Key LDAP ? [y/N]"
+then
+  # Check and Configure SSH
+  if grep -q "AuthorizedKeysCommand /usr/local/bin/openssh-ldap-publickey" /etc/ssh/sshd_config
+  then
+    echo "SSH Already Set"
+  else
+    echo "AuthorizedKeysCommand /usr/local/bin/openssh-ldap-publickey" >> /etc/ssh/sshd_config
+    echo "AuthorizedKeysCommandUser nobody" >> /etc/ssh/sshd_config
+  fi
+
+  # Check and Configure SSH LDAP Key QueryTools
+  if [ -e /usr/local/bin/openssh-ldap-publickey ]
+  then
+    rm /usr/local/bin/openssh-ldap-publickey
+  fi
+  apt-get install -y wget
+  wget https://raw.githubusercontent.com/azenko/UbuntuLdapClientAutoConfiguration/master/openssh-ldap-publickey -P /usr/local/bin/
+  chmod 755 /usr/local/bin/openssh-ldap-publickey
+  chmod +x /usr/local/bin/openssh-ldap-publickey
+  chown root:root /usr/local/bin/openssh-ldap-publickey
+  apt-get install -y libnet-ldap-perl
+  service ssh restart
+fi
+
+echo ""
+echo "#################################"
+echo "##   Configuration Finished!   ##"
+echo "#################################"
